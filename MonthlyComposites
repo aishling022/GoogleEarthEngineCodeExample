@@ -1,5 +1,5 @@
 //area of interest, format: [longitude, latitude]
-var point = ee.Geometry.Point([-40.3684, -13.7242]);
+var point = ee.Geometry.Point([-41, -14]);
 
 // 2 km buffer around the point
 var roi = point.buffer(2000).bounds();
