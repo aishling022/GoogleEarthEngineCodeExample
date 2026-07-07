@@ -1,4 +1,4 @@
-//Define your area of interest
+//Define the area of interest
 
 // Format: [longitude, latitude]
 var point = ee.Geometry.Point([-40.3684,-13.7242]);
