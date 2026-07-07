@@ -1,0 +1,245 @@
+//area of interest, format: [longitude, latitude]
+var point = ee.Geometry.Point([-40.3684, -13.7242]);
+
+// 2 km buffer around the point
+var roi = point.buffer(2000).bounds();
+
+Map.centerObject(roi, 12);
+Map.addLayer(roi, {}, 'Area of Interest');
+
+// Landsat collection 2 surface reflectance
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.*')
+    .multiply(0.0000275)
+    .add(-0.2);
+
+  return image.addBands(opticalBands, null, true);}
+
+// Cloud, shadow, snow and fill mask, added to see cloud cover
+
+function maskLandsat(image) {
+  var qa = image.select('QA_PIXEL');
+
+  // QA_PIXEL bit values
+  var fill = 1 << 0;
+  var dilatedCloud = 1 << 1;
+  var cirrus = 1 << 2;
+  var cloud = 1 << 3;
+  var cloudShadow = 1 << 4;
+  var snow = 1 << 5;
+  var mask = qa.bitwiseAnd(fill).eq(0)
+    .and(qa.bitwiseAnd(dilatedCloud).eq(0))
+    .and(qa.bitwiseAnd(cirrus).eq(0))
+    .and(qa.bitwiseAnd(cloud).eq(0))
+    .and(qa.bitwiseAnd(cloudShadow).eq(0))
+    .and(qa.bitwiseAnd(snow).eq(0));
+
+  return image.updateMask(mask);}
+
+
+// Rename Landsat 4, 5, 7 bands to common names
+// Landsat 4, 5, 7:
+// B1 Blue, B2 Green, B3 Red, B4 NIR, B5 SWIR1, B7 SWIR2
+
+
+function renameL457(image) {
+  return image.select(
+    ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'QA_PIXEL'],
+    ['blue',  'green', 'red',   'nir',   'swir1', 'swir2', 'QA_PIXEL']
+  );}
+
+// renaming Landsat 8, 9 bands to common names
+// Landsat 8, 9:
+// B2 Blue, B3 Green, B4 Red, B5 NIR, B6 SWIR1, B7 SWIR2
+
+function renameL89(image) {
+  return image.select(
+    ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'QA_PIXEL'],
+    ['blue',  'green', 'red',   'nir',   'swir1', 'swir2', 'QA_PIXEL']
+  );}
+
+//loading Landsat collections
+
+var l4 = ee.ImageCollection('LANDSAT/LT04/C02/T1_L2')
+  .filterDate('1990-01-01', '1993-12-31')
+  .filterBounds(roi)
+  .map(applyScaleFactors)
+  .map(maskLandsat)
+  .map(renameL457);
+
+var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+  .filterDate('1990-01-01', '2012-12-31')
+  .filterBounds(roi)
+  .map(applyScaleFactors)
+  .map(maskLandsat)
+  .map(renameL457);
+
+var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+  .filterDate('1999-01-01', '2026-06-01')
+  .filterBounds(roi)
+  .map(applyScaleFactors)
+  .map(maskLandsat)
+  .map(renameL457);
+
+var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate('2013-01-01', '2026-06-01')
+  .filterBounds(roi)
+  .map(applyScaleFactors)
+  .map(maskLandsat)
+  .map(renameL89);
+
+var l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+  .filterDate('2021-01-01', '2026-06-01')
+  .filterBounds(roi)
+  .map(applyScaleFactors)
+  .map(maskLandsat)
+  .map(renameL89);
+
+//merging all the Landsat sensors
+
+var landsatAll = l4.merge(l5).merge(l7).merge(l8).merge(l9)
+  .sort('system:time_start');
+
+print('Total Landsat images:', landsatAll.size());
+print('Merged Landsat collection preview:', landsatAll.limit(10));
+
+//monthly composite 
+
+// start = January 1990
+// end exclusive = June 2026, so May 2026 is included
+var monthlyStartDate = ee.Date('1990-01-01');
+var monthlyEndDateExclusive = ee.Date('2026-06-01');
+
+//google drive folder name
+var exportFolder = 'GEE_exports_monthly_composites';
+
+//composite image per month
+
+function prepareMonthlyComposite(collection) {
+  var composite = collection
+    .median()
+    .clip(roi);
+
+  var ndvi = composite
+    .normalizedDifference(['nir', 'red'])
+    .rename('NDVI');
+
+  var exportImage = composite
+    .select(['blue', 'green', 'red', 'nir', 'swir1', 'swir2'])
+    .addBands(ndvi)
+    .toFloat();
+
+  return exportImage;}
+
+//monthly table metadata
+
+var nMonths = monthlyEndDateExclusive
+  .difference(monthlyStartDate, 'month')
+  .round();
+
+print('Number of monthly periods:', nMonths);
+
+var monthlyMetadata = ee.FeatureCollection(
+  ee.List.sequence(0, nMonths.subtract(1)).map(function(i) {
+
+    var start = monthlyStartDate.advance(i, 'month');
+    var end = start.advance(1, 'month');
+
+    var monthlyCollection = landsatAll
+      .filterDate(start, end)
+      .filterBounds(roi);
+
+    var exportName = ee.String('landsat_monthly_')
+      .cat(start.format('YYYY_MM'));
+
+    return ee.Feature(null, {
+      'start_date': start.format('YYYY-MM-dd'),
+      'end_date': end.format('YYYY-MM-dd'),
+      'year': start.get('year'),
+      'month': start.get('month'),
+      'export_name': exportName,
+      'image_count': monthlyCollection.size()
+    });
+  })
+);
+
+print('monthly metadata:', monthlyMetadata);
+print(
+  'Monthly composites with available images:',
+  monthlyMetadata.filter(ee.Filter.gt('image_count', 0)).size()
+);
+
+
+//one composite on the map
+
+var previewStart = '1990-01-01';
+var previewEnd = '1990-02-01';
+
+var previewCollection = landsatAll
+  .filterDate(previewStart, previewEnd)
+  .filterBounds(roi);
+
+print('Preview month image count:', previewCollection.size());
+
+var previewImage = prepareMonthlyComposite(previewCollection);
+
+Map.addLayer(previewImage, {
+  bands: ['red', 'green', 'blue'],
+  min: 0,
+  max: 0.3
+}, 'Preview monthly true colour');
+
+Map.addLayer(previewImage.select('NDVI'), {
+  min: 0,
+  max: 1,
+  palette: ['white', 'yellow', 'green']
+}, 'Preview monthly NDVI');
+
+
+//export to google drive
+
+monthlyMetadata.evaluate(function(fc) {
+
+  var features = fc.features;
+
+  print('Creating monthly export tasks...');
+
+  features.forEach(function(feature) {
+
+    var props = feature.properties;
+
+    var imageCount = props.image_count;
+    var startDate = props.start_date;
+    var endDate = props.end_date;
+    var exportName = props.export_name;
+
+    // skips months with no Landsat images
+    if (imageCount > 0) {
+
+      var monthlyCollection = landsatAll
+        .filterDate(startDate, endDate)
+        .filterBounds(roi);
+
+      var exportImage = prepareMonthlyComposite(monthlyCollection);
+
+      Export.image.toDrive({
+        image: exportImage,
+        description: exportName,
+        folder: exportFolder,
+        fileNamePrefix: exportName,
+        region: roi,
+        scale: 30,
+        crs: 'EPSG:4326',
+        maxPixels: 1e13,
+        fileFormat: 'GeoTIFF'
+      });
+
+    } else {
+      print('Skipped empty month:', exportName);
+    }
+
+  });
+
+  print('Monthly export tasks created.');
+  print('Open the Tasks tab and run the exports.');
+});
